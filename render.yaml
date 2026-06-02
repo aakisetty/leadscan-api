@@ -12,6 +12,10 @@ services:
     healthCheckPath: /health
 
     envVars:
+      # ── Auth ─────────────────────────────────────────────────────────────
+      - key: API_SECRET_KEY
+        sync: false          # Set a strong random string — e.g. openssl rand -hex 32
+
       # ── Google APIs ──────────────────────────────────────────────────────
       - key: GOOGLE_PLACES_API_KEY
         sync: false          # Set in Render dashboard — never commit to git

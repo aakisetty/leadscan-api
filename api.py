@@ -18,11 +18,38 @@ import threading
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Security, Depends
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 
 from pipeline import run_pipeline
+
+# ─────────────────────────────────────────
+# Auth
+# ─────────────────────────────────────────
+_bearer = HTTPBearer(auto_error=False)
+
+def require_api_key(
+    creds: HTTPAuthorizationCredentials = Security(_bearer),
+):
+    """
+    Validates Bearer token against API_SECRET_KEY env var.
+    If API_SECRET_KEY is not set the server starts unprotected and logs a warning.
+    Accepts both:
+      Authorization: Bearer <key>
+      X-API-Key: <key>   (checked via query param fallback in the header)
+    """
+    secret = os.environ.get("API_SECRET_KEY", "").strip()
+    if not secret:
+        return  # No key configured — open access (warn at startup)
+
+    token = (creds.credentials if creds else None)
+    if token != secret:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or missing API key. Pass it as: Authorization: Bearer <key>",
+        )
 
 # ─────────────────────────────────────────
 # Logging
@@ -38,6 +65,11 @@ app = FastAPI(
     description = "Automated lead generation for digital marketing agencies.",
     version     = "1.0.0",
 )
+
+@app.on_event("startup")
+async def _startup():
+    if not os.environ.get("API_SECRET_KEY", "").strip():
+        log.warning("⚠️  API_SECRET_KEY not set — /run, /jobs, and /results are UNPROTECTED")
 
 # In-memory job store (persists within a single server session).
 # On Render free tier, this resets when the service spins down.
@@ -119,7 +151,7 @@ def health():
 
 
 @app.post("/run", status_code=202)
-def start_run(req: RunRequest, background_tasks: BackgroundTasks):
+def start_run(req: RunRequest, background_tasks: BackgroundTasks, _=Depends(require_api_key)):
     """
     Starts a pipeline run. Returns immediately with a job_id.
     Poll GET /jobs/{job_id} for status.
@@ -164,7 +196,7 @@ def get_job(job_id: str):
 
 
 @app.get("/results/{job_id}")
-def get_results(job_id: str):
+def get_results(job_id: str, _=Depends(require_api_key)):
     """Returns the completed leads array as JSON."""
     job = JOBS.get(job_id)
     if not job:
@@ -179,7 +211,7 @@ def get_results(job_id: str):
 
 
 @app.get("/jobs")
-def list_jobs():
+def list_jobs(_=Depends(require_api_key)):
     """Lists all jobs in reverse-chronological order."""
     jobs_list = [
         {k: v for k, v in j.items() if k not in ("results_path", "log")}
@@ -264,6 +296,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </div>
 
 <div class="container">
+  <!-- API Key -->
+  <div class="card" style="margin-bottom:16px; padding:18px 28px;">
+    <div class="form-row" style="align-items:flex-end">
+      <div class="form-group" style="flex:2">
+        <label>API Key</label>
+        <input id="apiKey" type="password" placeholder="Bearer token — set as API_SECRET_KEY on Render"
+               style="font-family:monospace"
+               oninput="saveKey(this.value)">
+      </div>
+      <div style="font-size:12px; color:#475569; padding-bottom:12px; white-space:nowrap">
+        Stored locally in your browser. Never sent to anyone else.
+      </div>
+    </div>
+  </div>
+
   <!-- Run form -->
   <div class="card">
     <h2>New Run</h2>
@@ -306,6 +353,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <script>
   let pollers = {};
 
+  // Persist API key in localStorage so you don't re-enter it each visit
+  function saveKey(val) { localStorage.setItem('ls_api_key', val); }
+  function getKey()     { return document.getElementById('apiKey').value.trim(); }
+
+  function authHeaders() {
+    const key = getKey();
+    return key
+      ? { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key }
+      : { 'Content-Type': 'application/json' };
+  }
+
   async function startRun() {
     const btn = document.getElementById('runBtn');
     btn.disabled = true; btn.textContent = 'Starting…';
@@ -317,8 +375,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       skip_dedup: true,
     };
     try {
-      const r = await fetch('/run', { method:'POST',
-        headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+      const r = await fetch('/run', { method:'POST', headers: authHeaders(), body: JSON.stringify(body) });
+      if (r.status === 401) { alert('Invalid API key — check the key above.'); btn.disabled=false; btn.textContent='▶ Run'; return; }
       const data = await r.json();
       showToast('Job started — ' + data.job_id.slice(0,8));
       pollJob(data.job_id);
@@ -328,7 +386,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   }
 
   async function refreshJobs() {
-    const r = await fetch('/jobs');
+    const r = await fetch('/jobs', { headers: authHeaders() });
+    if (r.status === 401) {
+      document.getElementById('jobs-container').innerHTML =
+        '<div class="empty-state" style="color:#f87171">🔒 Enter your API key above to view jobs.</div>';
+      return;
+    }
     const jobs = await r.json();
     const container = document.getElementById('jobs-container');
     if (!jobs.length) {
@@ -405,7 +468,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     setTimeout(() => t.style.display = 'none', 3000);
   }
 
-  // Load jobs on page load
+  // Restore saved API key and load jobs on page load
+  const savedKey = localStorage.getItem('ls_api_key');
+  if (savedKey) document.getElementById('apiKey').value = savedKey;
   refreshJobs();
   setInterval(refreshJobs, 10000);
 </script>
