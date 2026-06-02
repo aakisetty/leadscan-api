@@ -409,7 +409,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       if (r.status === 401) { alert('Invalid API key — check the key entered above.'); btn.disabled=false; btn.textContent='▶ Run'; return; }
       if (!r.ok) {
         const txt = await r.text();
-        alert(`Server error ${r.status}: ${txt.slice(0,200)}\n\nCheck the Render Logs tab for details.`);
+        alert('Server error ' + r.status + ': ' + txt.slice(0, 200) + '\n\nCheck the Render Logs tab for details.');
         btn.disabled=false; btn.textContent='▶ Run'; return;
       }
       const data = await r.json();
@@ -431,7 +431,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
     if (!r.ok) {
       document.getElementById('jobs-container').innerHTML =
-        `<div class="empty-state" style="color:#f87171">Server error ${r.status} — check Render Logs tab.</div>`;
+        '<div class="empty-state" style="color:#f87171">Server error ' + r.status + ' — check Render Logs tab.</div>';
       return;
     }
     const jobs = await r.json();
@@ -440,33 +440,34 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       container.innerHTML = '<div class="empty-state">No jobs yet. Start a run above.</div>';
       return;
     }
-    container.innerHTML = `
-      <table class="jobs-table">
-        <thead><tr>
-          <th>ID</th><th>Query</th><th>Status</th><th>Leads</th>
-          <th>Duration</th><th>Actions</th>
-        </tr></thead>
-        <tbody>
-        ${jobs.map(j => `
-          <tr id="row-${j.job_id}">
-            <td style="font-family:monospace;color:#64748b">${j.job_id.slice(0,8)}</td>
-            <td>${j.industry} · ${j.location}<br>
-                <span style="color:#64748b;font-size:12px">${j.started_at ? j.started_at.slice(0,19).replace('T',' ') : ''}</span>
-            </td>
-            <td><span class="status ${j.status}"><span class="dot"></span>${j.status}</span></td>
-            <td>${j.lead_count != null ? j.lead_count : '—'}</td>
-            <td>${j.duration_s != null ? j.duration_s + 's' : '—'}</td>
-            <td>
-              <a class="link" href="#" onclick="toggleLog('${j.job_id}');return false">Log</a>
-              ${j.status === 'completed' ? ` &nbsp;<a class="link" href="/results/${j.job_id}" target="_blank">Results</a>` : ''}
-            </td>
-          </tr>
-          <tr><td colspan="6" style="padding:0">
-            <div class="log-box" id="log-${j.job_id}">Loading log…</div>
-          </td></tr>
-        `).join('')}
-        </tbody>
-      </table>`;
+    // Build table with string concatenation — avoids nested template literal issues
+    var rows = '';
+    for (var i = 0; i < jobs.length; i++) {
+      var j = jobs[i];
+      var jid = j.job_id;
+      var jid8 = jid.slice(0, 8);
+      var ts = j.started_at ? j.started_at.slice(0, 19).replace('T', ' ') : '';
+      var leads = j.lead_count != null ? j.lead_count : '—';
+      var dur   = j.duration_s != null ? j.duration_s + 's' : '—';
+      var resultsLink = j.status === 'completed'
+        ? ' &nbsp;<a class="link" href="/results/' + jid + '" target="_blank">Results</a>'
+        : '';
+      rows += '<tr id="row-' + jid + '">';
+      rows += '<td style="font-family:monospace;color:#64748b">' + jid8 + '</td>';
+      rows += '<td>' + j.industry + ' · ' + j.location + '<br>';
+      rows += '<span style="color:#64748b;font-size:12px">' + ts + '</span></td>';
+      rows += '<td><span class="status ' + j.status + '"><span class="dot"></span>' + j.status + '</span></td>';
+      rows += '<td>' + leads + '</td>';
+      rows += '<td>' + dur + '</td>';
+      rows += '<td><a class="link" href="#" onclick="toggleLog(\'' + jid + '\');return false">Log</a>' + resultsLink + '</td>';
+      rows += '</tr>';
+      rows += '<tr><td colspan="6" style="padding:0">';
+      rows += '<div class="log-box" id="log-' + jid + '">Loading log...</div>';
+      rows += '</td></tr>';
+    }
+    container.innerHTML = '<table class="jobs-table"><thead><tr>'
+      + '<th>ID</th><th>Query</th><th>Status</th><th>Leads</th><th>Duration</th><th>Actions</th>'
+      + '</tr></thead><tbody>' + rows + '</tbody></table>';
 
     // Resume polling for running/queued jobs
     jobs.forEach(j => {
