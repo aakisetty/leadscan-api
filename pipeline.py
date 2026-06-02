@@ -40,6 +40,8 @@ def run_pipeline(
     skip_dedup:  bool = True,
     skip_crm:    bool = False,
     region:      str  = "AU",
+    suburb:      str  = "",
+    postcode:    str  = "",
     on_progress: Optional[Callable[[str], None]] = None,
 ) -> dict:
     """
@@ -72,6 +74,8 @@ def run_pipeline(
             skip_dedup  = skip_dedup,
             region_code = region,
             max_pages   = max_pages,
+            suburb      = suburb,
+            postcode    = postcode,
         )
         emit(f"[1/4] Scraper — {len(raw_leads)} new leads found.")
     except Exception as e:

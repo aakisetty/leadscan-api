@@ -65,16 +65,38 @@ GHL_RATE_LIMIT_MS  = 0.3   # seconds between GHL dedup calls
 # ─────────────────────────────────────────
 # Google Places scraping
 # ─────────────────────────────────────────
+def geocode_location(address: str, api_key: str) -> dict:
+    """
+    Uses the Google Geocoding API to convert an address string to lat/lng.
+    Returns {"lat": float, "lng": float} or None on failure.
+    """
+    try:
+        r = requests.get(
+            "https://maps.googleapis.com/maps/api/geocode/json",
+            params={"address": address, "key": api_key},
+            timeout=10,
+        )
+        results = r.json().get("results", [])
+        if results:
+            loc = results[0]["geometry"]["location"]
+            return {"lat": loc["lat"], "lng": loc["lng"]}
+    except Exception as e:
+        print(f"[Scraper][WARN] Geocoding failed for '{address}': {e}", file=sys.stderr)
+    return None
+
+
 def scrape_google_places(
     query: str,
     api_key: str,
     region_code: str = "AU",
     max_pages: int = DEFAULT_MAX_PAGES,
     page_size: int = DEFAULT_PAGE_SIZE,
+    location_bias: dict = None,   # {"lat": float, "lng": float, "radius_m": int}
 ) -> list:
     """
     Calls Google Places Text Search (New) API.
     Paginates up to max_pages, returns list of raw Place dicts.
+    Optional location_bias restricts results to a circle around a point.
     """
     results   = []
     page_token = None
@@ -93,6 +115,18 @@ def scrape_google_places(
         }
         if page_token:
             body["pageToken"] = page_token
+
+        # Restrict results to a circle around suburb/postcode if provided
+        if location_bias and page_num == 0:  # only on first page (not compatible with pageToken)
+            body["locationBias"] = {
+                "circle": {
+                    "center": {
+                        "latitude":  location_bias["lat"],
+                        "longitude": location_bias["lng"],
+                    },
+                    "radius": float(location_bias.get("radius_m", 3000)),
+                }
+            }
 
         try:
             resp = requests.post(
@@ -156,11 +190,16 @@ def parse_place(place: dict, source_query: str, scraped_at: str) -> dict:
     }
 
 
-def make_source_slug(industry: str, location: str) -> str:
+def make_source_slug(industry: str, location: str, suburb: str = "", postcode: str = "") -> str:
     """Normalised slug used as GHL tag and for Scheduler queries."""
     def slugify(s):
-        return s.lower().strip().replace(" ", "_").replace(",", "")
-    return f"{slugify(industry)}__{slugify(location)}"
+        return s.lower().strip().replace(" ", "_").replace(",", "").replace("/", "_")
+    parts = [slugify(industry), slugify(location)]
+    if suburb:
+        parts.append(slugify(suburb))
+    if postcode:
+        parts.append(slugify(postcode))
+    return "__".join(parts)
 
 
 # ─────────────────────────────────────────
@@ -243,10 +282,14 @@ def run_scraper(
     skip_dedup: bool = False,
     region_code: str = "AU",
     max_pages: int = DEFAULT_MAX_PAGES,
+    suburb: str = "",
+    postcode: str = "",
 ) -> list:
     """
     Full scraper pipeline:
       1. Google Places Text Search (paginated)
+         - If suburb or postcode provided, builds a tighter query and
+           geocodes the area to apply a locationBias circle (~3km radius)
       2. Filter out permanently-closed businesses
       3. Parse into lead objects
       4. GHL dedup check (unless skip_dedup)
@@ -266,18 +309,38 @@ def run_scraper(
             "(set them or pass --skip-dedup)"
         )
 
-    query        = f"{industry} in {location}"
-    source_query = make_source_slug(industry, location)
+    # Build query — include suburb/postcode for tighter results
+    location_parts = [location]
+    if suburb:
+        location_parts = [suburb, location]
+    if postcode:
+        location_parts = [postcode] + location_parts
+    search_location = ", ".join(dict.fromkeys(location_parts))  # dedupe
+    query        = f"{industry} in {search_location}"
+    source_query = make_source_slug(industry, location, suburb, postcode)
     scraped_at   = datetime.now(timezone.utc).isoformat()
+
+    # Geocode suburb/postcode for locationBias if provided
+    location_bias = None
+    if suburb or postcode:
+        geo_address = f"{postcode or suburb}, {location}, {region_code}"
+        coords = geocode_location(geo_address, places_key)
+        if coords:
+            location_bias = {**coords, "radius_m": 3000}
+            print(f"[Scraper] LocationBias: {geo_address} → {coords}", file=sys.stderr)
+        else:
+            print(f"[Scraper] Could not geocode '{geo_address}' — using text query only", file=sys.stderr)
 
     print(f"[Scraper] ─── Starting ───────────────────────────────────────", file=sys.stderr)
     print(f"[Scraper] Query:        '{query}'", file=sys.stderr)
     print(f"[Scraper] Source slug:  {source_query}", file=sys.stderr)
     print(f"[Scraper] Region:       {region_code}", file=sys.stderr)
     print(f"[Scraper] Max pages:    {max_pages}", file=sys.stderr)
+    if suburb:   print(f"[Scraper] Suburb:       {suburb}", file=sys.stderr)
+    if postcode: print(f"[Scraper] Postcode:     {postcode}", file=sys.stderr)
 
     # Step 1 — Fetch from Google Places
-    raw_places = scrape_google_places(query, places_key, region_code, max_pages)
+    raw_places = scrape_google_places(query, places_key, region_code, max_pages, location_bias=location_bias)
     print(f"[Scraper] Total raw results: {len(raw_places)}", file=sys.stderr)
 
     # Step 2 — Filter permanently closed

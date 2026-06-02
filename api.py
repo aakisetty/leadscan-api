@@ -167,6 +167,8 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 class RunRequest(BaseModel):
     industry:   str
     location:   str
+    suburb:     str  = ""    # Optional: refine to a specific suburb (e.g. "Surry Hills")
+    postcode:   str  = ""    # Optional: refine to a postcode (e.g. "2010")
     max_pages:  int  = 1     # 1 page = up to 20 businesses (~$0.34 in Places API)
     region:     str  = "AU"
     skip_dedup: bool = True  # Set False once GHL is configured
@@ -192,6 +194,8 @@ def _run_job(job_id: str, req: RunRequest):
             skip_dedup  = req.skip_dedup,
             skip_crm    = req.skip_crm,
             region      = req.region,
+            suburb      = req.suburb,
+            postcode    = req.postcode,
             on_progress = on_progress,
         )
 
@@ -359,6 +363,8 @@ async function startRun() {
   var body = {
     industry:   document.getElementById('industry').value.trim(),
     location:   document.getElementById('location').value.trim(),
+    suburb:     document.getElementById('suburb').value.trim(),
+    postcode:   document.getElementById('postcode').value.trim(),
     max_pages:  parseInt(document.getElementById('max_pages').value),
     region:     document.getElementById('region').value.trim(),
     skip_dedup: true,
@@ -576,7 +582,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <label>Location</label>
         <input id="location" type="text" value="Sydney" placeholder="e.g. Sydney">
       </div>
-      <div class="form-group" style="max-width:120px">
+      <div class="form-group">
+        <label>Suburb <span style="color:#475569;font-weight:400">(optional)</span></label>
+        <input id="suburb" type="text" placeholder="e.g. Surry Hills">
+      </div>
+      <div class="form-group" style="max-width:110px">
+        <label>Postcode <span style="color:#475569;font-weight:400">(opt)</span></label>
+        <input id="postcode" type="text" placeholder="e.g. 2010">
+      </div>
+      <div class="form-group" style="max-width:110px">
         <label>Pages</label>
         <select id="max_pages">
           <option value="1">1 (~20)</option>
@@ -584,11 +598,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <option value="3">3 (~60)</option>
         </select>
       </div>
-      <div class="form-group" style="max-width:110px">
+      <div class="form-group" style="max-width:80px">
         <label>Region</label>
         <input id="region" type="text" value="AU">
       </div>
-      <button class="btn" id="runBtn" onclick="startRun()">▶ Run</button>
+      <button class="btn" id="runBtn" onclick="startRun()">Run</button>
     </div>
   </div>
 
