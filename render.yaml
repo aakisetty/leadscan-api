@@ -16,6 +16,10 @@ services:
       - key: API_SECRET_KEY
         sync: false          # Set a strong random string — e.g. openssl rand -hex 32
 
+      # ── Persistence ──────────────────────────────────────────────────────
+      - key: UPSTASH_REDIS_URL
+        sync: false          # rediss://default:PASSWORD@ENDPOINT.upstash.io:6380
+
       # ── Google APIs ──────────────────────────────────────────────────────
       - key: GOOGLE_PLACES_API_KEY
         sync: false          # Set in Render dashboard — never commit to git

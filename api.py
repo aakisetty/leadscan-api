@@ -13,6 +13,7 @@ Endpoints:
 import os
 import uuid
 import json
+import time
 import logging
 import threading
 from datetime import datetime, timezone
@@ -70,11 +71,91 @@ app = FastAPI(
 @app.on_event("startup")
 async def _startup():
     if not os.environ.get("API_SECRET_KEY", "").strip():
-        log.warning("⚠️  API_SECRET_KEY not set — /run, /jobs, and /results are UNPROTECTED")
+        log.warning("API_SECRET_KEY not set — endpoints are UNPROTECTED")
+    log.info(f"JobStore mode: {JOBS.mode}")
 
-# In-memory job store (persists within a single server session).
-# On Render free tier, this resets when the service spins down.
-JOBS: dict[str, dict] = {}
+
+# ─────────────────────────────────────────
+# Job store — Redis-backed with memory fallback
+# ─────────────────────────────────────────
+class JobStore:
+    """
+    Stores jobs in Redis (persistent across redeploys) when UPSTASH_REDIS_URL
+    is set, otherwise falls back to an in-memory dict.
+
+    Each job is stored as JSON at key  leadscan:job:{job_id}  with a 7-day TTL.
+    A sorted set  leadscan:jobs  tracks job IDs ordered by creation time.
+    """
+    _PREFIX  = "leadscan:job:"
+    _SET_KEY = "leadscan:jobs"
+    _TTL     = 7 * 24 * 3600   # 7 days
+
+    def __init__(self):
+        self._r    = None
+        self._mem  = {}
+        self.mode  = "memory"
+        url = os.environ.get("UPSTASH_REDIS_URL", "").strip()
+        if url:
+            try:
+                import redis as _redis
+                self._r   = _redis.from_url(url, decode_responses=True, socket_timeout=5)
+                self._r.ping()
+                self.mode = "redis"
+                log.info("JobStore: connected to Redis ✅")
+            except Exception as e:
+                log.warning(f"JobStore: Redis unavailable ({e}) — using memory fallback")
+
+    # ── write ──────────────────────────────────────────────────────────────
+    def create(self, job_id: str, data: dict):
+        data = dict(data)
+        if self._r:
+            self._r.set(f"{self._PREFIX}{job_id}", json.dumps(data, ensure_ascii=False), ex=self._TTL)
+            self._r.zadd(self._SET_KEY, {job_id: time.time()})
+            self._r.expire(self._SET_KEY, self._TTL)
+        else:
+            self._mem[job_id] = data
+
+    def _save(self, job_id: str, data: dict):
+        if self._r:
+            self._r.set(f"{self._PREFIX}{job_id}", json.dumps(data, ensure_ascii=False), ex=self._TTL)
+        else:
+            self._mem[job_id] = data
+
+    def update(self, job_id: str, **fields):
+        """Merge fields into an existing job and persist."""
+        job = self.get(job_id)
+        if job is None:
+            return
+        job.update(fields)
+        self._save(job_id, job)
+
+    def append_log(self, job_id: str, msg: str):
+        """Append a log line to the job's log list."""
+        job = self.get(job_id)
+        if job is None:
+            return
+        job.setdefault("log", []).append(msg)
+        self._save(job_id, job)
+
+    # ── read ───────────────────────────────────────────────────────────────
+    def get(self, job_id: str) -> Optional[dict]:
+        if self._r:
+            raw = self._r.get(f"{self._PREFIX}{job_id}")
+            return json.loads(raw) if raw else None
+        return self._mem.get(job_id)
+
+    def all(self) -> list:
+        """All jobs, newest first (up to 200)."""
+        if self._r:
+            ids = self._r.zrevrange(self._SET_KEY, 0, 199)
+            if not ids:
+                return []
+            vals = self._r.mget(*[f"{self._PREFIX}{i}" for i in ids])
+            return [json.loads(v) for v in vals if v]
+        return sorted(self._mem.values(), key=lambda j: j.get("started_at", ""), reverse=True)
+
+
+JOBS = JobStore()
 
 RESULTS_DIR = "/tmp/leadscan_results"
 os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -96,15 +177,11 @@ class RunRequest(BaseModel):
 # Background pipeline runner
 # ─────────────────────────────────────────
 def _run_job(job_id: str, req: RunRequest):
-    """
-    Runs the full pipeline in a background thread.
-    Updates JOBS[job_id] as it progresses.
-    """
-    job = JOBS[job_id]
-    job["status"] = "running"
+    """Runs the full pipeline in a background thread, persisting progress to JobStore."""
+    JOBS.update(job_id, status="running")
 
     def on_progress(msg: str):
-        job["log"].append(msg)
+        JOBS.append_log(job_id, msg)
         log.info(f"[{job_id[:8]}] {msg}")
 
     try:
@@ -118,29 +195,31 @@ def _run_job(job_id: str, req: RunRequest):
             on_progress = on_progress,
         )
 
-        # Save results to /tmp for retrieval
+        # Store results JSON in Redis (as leads_json field) AND /tmp for fallback
         results_path = f"{RESULTS_DIR}/{job_id}.json"
+        leads_json   = json.dumps(result["leads"], ensure_ascii=False)
         with open(results_path, "w", encoding="utf-8") as f:
-            json.dump(result["leads"], f, indent=2, ensure_ascii=False)
+            f.write(leads_json)
 
-        job.update({
-            "status":       "completed",
-            "completed_at": datetime.now(timezone.utc).isoformat(),
-            "lead_count":   result["lead_count"],
-            "stages":       result["stages"],
-            "duration_s":   result["duration_s"],
-            "errors":       result["errors"],
-            "results_path": results_path,
-        })
+        JOBS.update(job_id,
+            status       = "completed",
+            completed_at = datetime.now(timezone.utc).isoformat(),
+            lead_count   = result["lead_count"],
+            stages       = result["stages"],
+            duration_s   = result["duration_s"],
+            errors       = result["errors"],
+            results_path = results_path,
+            leads_json   = leads_json,   # stored in Redis so results survive redeploys
+        )
 
     except Exception as e:
         log.exception(f"[{job_id[:8]}] Pipeline error")
-        job.update({
-            "status":     "failed",
-            "completed_at": datetime.now(timezone.utc).isoformat(),
-            "error":      str(e),
-        })
-        job["log"].append(f"ERROR: {e}")
+        JOBS.update(job_id,
+            status       = "failed",
+            completed_at = datetime.now(timezone.utc).isoformat(),
+            error        = str(e),
+        )
+        JOBS.append_log(job_id, f"ERROR: {e}")
 
 
 # ─────────────────────────────────────────
@@ -148,7 +227,7 @@ def _run_job(job_id: str, req: RunRequest):
 # ─────────────────────────────────────────
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "LeadScan AI", "jobs_in_memory": len(JOBS)}
+    return {"status": "ok", "service": "LeadScan AI", "store": JOBS.mode}
 
 
 @app.get("/debug")
@@ -188,7 +267,7 @@ def start_run(req: RunRequest, background_tasks: BackgroundTasks, _=Depends(requ
     Poll GET /jobs/{job_id} for status.
     """
     job_id = str(uuid.uuid4())
-    JOBS[job_id] = {
+    JOBS.create(job_id, {
         "job_id":       job_id,
         "industry":     req.industry,
         "location":     req.location,
@@ -202,7 +281,8 @@ def start_run(req: RunRequest, background_tasks: BackgroundTasks, _=Depends(requ
         "errors":       [],
         "log":          [f"Job queued: {req.industry} in {req.location}"],
         "results_path": None,
-    }
+        "leads_json":   None,
+    })
 
     # Run in a background thread so we can return immediately
     t = threading.Thread(target=_run_job, args=(job_id, req), daemon=True)
@@ -222,8 +302,7 @@ def get_job(job_id: str):
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    # Don't expose the internal file path
-    return {k: v for k, v in job.items() if k != "results_path"}
+    return {k: v for k, v in job.items() if k not in ("results_path", "leads_json")}
 
 
 @app.get("/results/{job_id}")
@@ -234,21 +313,27 @@ def get_results(job_id: str, key: str = Query(default=None), _=Depends(require_a
         raise HTTPException(status_code=404, detail="Job not found")
     if job["status"] != "completed":
         raise HTTPException(status_code=409, detail=f"Job status is '{job['status']}' — not completed yet")
+
+    # Prefer the Redis-stored JSON (survives redeploys), fall back to /tmp file
+    if job.get("leads_json"):
+        return JSONResponse(content=json.loads(job["leads_json"]))
+
     results_path = job.get("results_path")
-    if not results_path or not os.path.exists(results_path):
-        raise HTTPException(status_code=404, detail="Results file not found")
-    with open(results_path, encoding="utf-8") as f:
-        return JSONResponse(content=json.load(f))
+    if results_path and os.path.exists(results_path):
+        with open(results_path, encoding="utf-8") as f:
+            return JSONResponse(content=json.load(f))
+
+    raise HTTPException(status_code=404, detail="Results not found — job may be from a previous deployment")
 
 
 @app.get("/jobs")
 def list_jobs(_=Depends(require_api_key)):
     """Lists all jobs in reverse-chronological order."""
     jobs_list = [
-        {k: v for k, v in j.items() if k not in ("results_path", "log")}
-        for j in JOBS.values()
+        {k: v for k, v in j.items() if k not in ("results_path", "log", "leads_json")}
+        for j in JOBS.all()
     ]
-    return sorted(jobs_list, key=lambda j: j.get("started_at", ""), reverse=True)
+    return jobs_list
 
 
 # ─────────────────────────────────────────
