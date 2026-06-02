@@ -251,7 +251,144 @@ def list_jobs(_=Depends(require_api_key)):
 
 
 # ─────────────────────────────────────────
-# Dashboard
+# Dashboard JS  (raw string — Python never processes escape sequences)
+# ─────────────────────────────────────────
+DASHBOARD_JS = r"""
+'use strict';
+var pollers = {};
+
+function saveKey(val) { localStorage.setItem('ls_api_key', val); }
+function getKey()     { return document.getElementById('apiKey').value.trim(); }
+
+function authHeaders() {
+  var key = getKey();
+  return key
+    ? { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key }
+    : { 'Content-Type': 'application/json' };
+}
+
+async function startRun() {
+  var btn = document.getElementById('runBtn');
+  btn.disabled = true; btn.textContent = 'Starting...';
+  var body = {
+    industry:   document.getElementById('industry').value.trim(),
+    location:   document.getElementById('location').value.trim(),
+    max_pages:  parseInt(document.getElementById('max_pages').value),
+    region:     document.getElementById('region').value.trim(),
+    skip_dedup: true,
+  };
+  try {
+    var r = await fetch('/run', { method: 'POST', headers: authHeaders(), body: JSON.stringify(body) });
+    if (r.status === 401) {
+      alert('Invalid API key. Check the key field at the top.');
+      btn.disabled = false; btn.textContent = 'Run'; return;
+    }
+    if (!r.ok) {
+      var txt = await r.text();
+      alert('Server error ' + r.status + ': ' + txt.slice(0, 300) + '\n\nCheck the Render Logs tab.');
+      btn.disabled = false; btn.textContent = 'Run'; return;
+    }
+    var data = await r.json();
+    showToast('Job started: ' + data.job_id.slice(0, 8));
+    pollJob(data.job_id);
+    await refreshJobs();
+  } catch (e) {
+    alert('Network error: ' + e);
+  }
+  btn.disabled = false; btn.textContent = 'Run';
+}
+
+async function refreshJobs() {
+  var r;
+  try { r = await fetch('/jobs', { headers: authHeaders() }); } catch (e) { return; }
+  var container = document.getElementById('jobs-container');
+  if (r.status === 401) {
+    container.innerHTML = '<div class="empty-state" style="color:#f87171">Enter your API key above to view jobs.</div>';
+    return;
+  }
+  if (!r.ok) {
+    container.innerHTML = '<div class="empty-state" style="color:#f87171">Server error ' + r.status + ' — check Render Logs.</div>';
+    return;
+  }
+  var jobs = await r.json();
+  if (!jobs.length) {
+    container.innerHTML = '<div class="empty-state">No jobs yet. Start a run above.</div>';
+    return;
+  }
+  var rows = '';
+  for (var i = 0; i < jobs.length; i++) {
+    var j = jobs[i];
+    var jid  = j.job_id;
+    var jid8 = jid.slice(0, 8);
+    var ts   = j.started_at ? j.started_at.slice(0, 19).replace('T', ' ') : '';
+    var leads = j.lead_count != null ? j.lead_count : '-';
+    var dur   = j.duration_s != null ? j.duration_s + 's' : '-';
+    var resLink = j.status === 'completed'
+      ? ' &nbsp;<a class="link" href="/results/' + jid + '" target="_blank">Results</a>' : '';
+    rows += '<tr id="row-' + jid + '">';
+    rows += '<td style="font-family:monospace;color:#64748b">' + jid8 + '</td>';
+    rows += '<td>' + j.industry + ' - ' + j.location;
+    rows += '<br><span style="color:#64748b;font-size:12px">' + ts + '</span></td>';
+    rows += '<td><span class="status ' + j.status + '"><span class="dot"></span>' + j.status + '</span></td>';
+    rows += '<td>' + leads + '</td>';
+    rows += '<td>' + dur + '</td>';
+    rows += '<td><a class="link" href="#" onclick="toggleLog(\'' + jid + '\');return false">Log</a>' + resLink + '</td>';
+    rows += '</tr>';
+    rows += '<tr><td colspan="6" style="padding:0"><div class="log-box" id="log-' + jid + '">Loading...</div></td></tr>';
+  }
+  container.innerHTML = '<table class="jobs-table"><thead><tr>'
+    + '<th>ID</th><th>Query</th><th>Status</th><th>Leads</th><th>Dur</th><th>Actions</th>'
+    + '</tr></thead><tbody>' + rows + '</tbody></table>';
+
+  jobs.forEach(function(j) {
+    if ((j.status === 'running' || j.status === 'queued') && !pollers[j.job_id]) {
+      pollJob(j.job_id);
+    }
+  });
+}
+
+async function toggleLog(jobId) {
+  var box = document.getElementById('log-' + jobId);
+  if (box.style.display === 'block') { box.style.display = 'none'; return; }
+  box.style.display = 'block';
+  var r = await fetch('/jobs/' + jobId, { headers: authHeaders() });
+  var j = await r.json();
+  box.textContent = (j.log || []).join('\n');
+  box.scrollTop = box.scrollHeight;
+}
+
+function pollJob(jobId) {
+  if (pollers[jobId]) return;
+  pollers[jobId] = setInterval(async function() {
+    var r = await fetch('/jobs/' + jobId, { headers: authHeaders() });
+    var j = await r.json();
+    var box = document.getElementById('log-' + jobId);
+    if (box && box.style.display === 'block') {
+      box.textContent = (j.log || []).join('\n');
+      box.scrollTop = box.scrollHeight;
+    }
+    if (j.status !== 'running' && j.status !== 'queued') {
+      clearInterval(pollers[jobId]); delete pollers[jobId];
+      refreshJobs();
+    }
+  }, 2000);
+}
+
+function showToast(msg) {
+  var t = document.getElementById('toast');
+  t.textContent = msg; t.style.display = 'block';
+  setTimeout(function() { t.style.display = 'none'; }, 3000);
+}
+
+// Init
+var savedKey = localStorage.getItem('ls_api_key');
+if (savedKey) document.getElementById('apiKey').value = savedKey;
+refreshJobs();
+setInterval(refreshJobs, 10000);
+"""
+
+# ─────────────────────────────────────────
+# Dashboard HTML
 # ─────────────────────────────────────────
 DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -378,147 +515,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
 </div>
 
-<div id="toast">✅ Job started!</div>
+<div id="toast">Job started!</div>
 
-<script>
-  let pollers = {};
-
-  // Persist API key in localStorage so you don't re-enter it each visit
-  function saveKey(val) { localStorage.setItem('ls_api_key', val); }
-  function getKey()     { return document.getElementById('apiKey').value.trim(); }
-
-  function authHeaders() {
-    const key = getKey();
-    return key
-      ? { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key }
-      : { 'Content-Type': 'application/json' };
-  }
-
-  async function startRun() {
-    const btn = document.getElementById('runBtn');
-    btn.disabled = true; btn.textContent = 'Starting…';
-    const body = {
-      industry:   document.getElementById('industry').value.trim(),
-      location:   document.getElementById('location').value.trim(),
-      max_pages:  parseInt(document.getElementById('max_pages').value),
-      region:     document.getElementById('region').value.trim(),
-      skip_dedup: true,
-    };
-    try {
-      const r = await fetch('/run', { method:'POST', headers: authHeaders(), body: JSON.stringify(body) });
-      if (r.status === 401) { alert('Invalid API key — check the key entered above.'); btn.disabled=false; btn.textContent='▶ Run'; return; }
-      if (!r.ok) {
-        const txt = await r.text();
-        alert('Server error ' + r.status + ': ' + txt.slice(0, 200) + '\n\nCheck the Render Logs tab for details.');
-        btn.disabled=false; btn.textContent='▶ Run'; return;
-      }
-      const data = await r.json();
-      showToast('Job started — ' + data.job_id.slice(0,8));
-      pollJob(data.job_id);
-      await refreshJobs();
-    } catch(e) { alert('Network error: ' + e + '\n\nIs the Render service running?'); }
-    btn.disabled = false; btn.textContent = '▶ Run';
-  }
-
-  async function refreshJobs() {
-    let r;
-    try { r = await fetch('/jobs', { headers: authHeaders() }); }
-    catch(e) { return; }  // Network error — silently skip refresh
-    if (r.status === 401) {
-      document.getElementById('jobs-container').innerHTML =
-        '<div class="empty-state" style="color:#f87171">🔒 Enter your API key above to view jobs.</div>';
-      return;
-    }
-    if (!r.ok) {
-      document.getElementById('jobs-container').innerHTML =
-        '<div class="empty-state" style="color:#f87171">Server error ' + r.status + ' — check Render Logs tab.</div>';
-      return;
-    }
-    const jobs = await r.json();
-    const container = document.getElementById('jobs-container');
-    if (!jobs.length) {
-      container.innerHTML = '<div class="empty-state">No jobs yet. Start a run above.</div>';
-      return;
-    }
-    // Build table with string concatenation — avoids nested template literal issues
-    var rows = '';
-    for (var i = 0; i < jobs.length; i++) {
-      var j = jobs[i];
-      var jid = j.job_id;
-      var jid8 = jid.slice(0, 8);
-      var ts = j.started_at ? j.started_at.slice(0, 19).replace('T', ' ') : '';
-      var leads = j.lead_count != null ? j.lead_count : '—';
-      var dur   = j.duration_s != null ? j.duration_s + 's' : '—';
-      var resultsLink = j.status === 'completed'
-        ? ' &nbsp;<a class="link" href="/results/' + jid + '" target="_blank">Results</a>'
-        : '';
-      rows += '<tr id="row-' + jid + '">';
-      rows += '<td style="font-family:monospace;color:#64748b">' + jid8 + '</td>';
-      rows += '<td>' + j.industry + ' · ' + j.location + '<br>';
-      rows += '<span style="color:#64748b;font-size:12px">' + ts + '</span></td>';
-      rows += '<td><span class="status ' + j.status + '"><span class="dot"></span>' + j.status + '</span></td>';
-      rows += '<td>' + leads + '</td>';
-      rows += '<td>' + dur + '</td>';
-      rows += '<td><a class="link" href="#" onclick="toggleLog(\'' + jid + '\');return false">Log</a>' + resultsLink + '</td>';
-      rows += '</tr>';
-      rows += '<tr><td colspan="6" style="padding:0">';
-      rows += '<div class="log-box" id="log-' + jid + '">Loading log...</div>';
-      rows += '</td></tr>';
-    }
-    container.innerHTML = '<table class="jobs-table"><thead><tr>'
-      + '<th>ID</th><th>Query</th><th>Status</th><th>Leads</th><th>Duration</th><th>Actions</th>'
-      + '</tr></thead><tbody>' + rows + '</tbody></table>';
-
-    // Resume polling for running/queued jobs
-    jobs.forEach(j => {
-      if ((j.status === 'running' || j.status === 'queued') && !pollers[j.job_id]) {
-        pollJob(j.job_id);
-      }
-    });
-  }
-
-  async function toggleLog(jobId) {
-    const box = document.getElementById('log-' + jobId);
-    if (box.style.display === 'block') { box.style.display = 'none'; return; }
-    box.style.display = 'block';
-    const r = await fetch('/jobs/' + jobId);
-    const j = await r.json();
-    box.textContent = j.log.join('\\n');
-    box.scrollTop = box.scrollHeight;
-  }
-
-  function pollJob(jobId) {
-    if (pollers[jobId]) return;
-    pollers[jobId] = setInterval(async () => {
-      const r = await fetch('/jobs/' + jobId);
-      const j = await r.json();
-      // Update log if open
-      const box = document.getElementById('log-' + jobId);
-      if (box && box.style.display === 'block') {
-        box.textContent = j.log.join('\\n');
-        box.scrollTop = box.scrollHeight;
-      }
-      if (j.status !== 'running' && j.status !== 'queued') {
-        clearInterval(pollers[jobId]); delete pollers[jobId];
-        refreshJobs();
-      }
-    }, 2000);
-  }
-
-  function showToast(msg) {
-    const t = document.getElementById('toast');
-    t.textContent = '✅ ' + msg; t.style.display = 'block';
-    setTimeout(() => t.style.display = 'none', 3000);
-  }
-
-  // Restore saved API key and load jobs on page load
-  const savedKey = localStorage.getItem('ls_api_key');
-  if (savedKey) document.getElementById('apiKey').value = savedKey;
-  refreshJobs();
-  setInterval(refreshJobs, 10000);
-</script>
+<script src="/app.js"></script>
 </body>
 </html>"""
+
+
+@app.get("/app.js")
+def dashboard_js():
+    from fastapi.responses import Response
+    return Response(content=DASHBOARD_JS, media_type="application/javascript")
 
 
 @app.get("/", response_class=HTMLResponse)
