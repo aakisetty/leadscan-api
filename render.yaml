@@ -1,0 +1,56 @@
+services:
+  - type: web
+    name: leadscan-api
+    runtime: python
+    region: oregon          # change to sydney for AU-closer latency
+    plan: starter           # $7/month — always-on (no cold starts)
+    # plan: free            # free tier — spins down after 15 min inactivity
+
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn api:app --host 0.0.0.0 --port $PORT --workers 1
+
+    healthCheckPath: /health
+
+    envVars:
+      # ── Google APIs ──────────────────────────────────────────────────────
+      - key: GOOGLE_PLACES_API_KEY
+        sync: false          # Set in Render dashboard — never commit to git
+
+      - key: PAGESPEED_API_KEY
+        sync: false
+
+      # ── Anthropic ────────────────────────────────────────────────────────
+      - key: ANTHROPIC_API_KEY
+        sync: false
+
+      # ── GoHighLevel ──────────────────────────────────────────────────────
+      - key: GHL_API_KEY
+        sync: false
+
+      - key: GHL_LOCATION_ID
+        sync: false
+
+      - key: GHL_PIPELINE_ID
+        sync: false
+
+      - key: GHL_STAGE_NO_WEBSITE
+        sync: false
+
+      - key: GHL_STAGE_WEBSITE_NO_ADS
+        sync: false
+
+      - key: GHL_STAGE_NEEDS_GBP_ADS
+        sync: false
+
+      - key: GHL_STAGE_NURTURE
+        sync: false
+
+      - key: GHL_WORKFLOW_ID
+        sync: false          # Optional
+
+      # ── Pipeline tuning ──────────────────────────────────────────────────
+      - key: AUDIT_DELAY_S
+        value: "1.5"         # Seconds between auditing each business
+
+      - key: REGION_CODE
+        value: "AU"
