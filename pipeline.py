@@ -11,16 +11,26 @@ import logging
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
-# Add agents directory to path
+# Add agents directory to path so imports work both locally and on Render
 _here = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_here, "agents"))
-
-from scraper    import run_scraper
-from auditor    import run_auditor
-from summariser import run_summariser
-from crm_writer import run_writer
+_agents_dir = os.path.join(_here, "agents")
+if _agents_dir not in sys.path:
+    sys.path.insert(0, _agents_dir)
 
 log = logging.getLogger("leadscan.pipeline")
+
+# Lazy imports — each agent is only imported when run_pipeline is called.
+# This prevents a single bad import from crashing the whole web server.
+def _import_agents():
+    try:
+        from scraper    import run_scraper    as _scraper
+        from auditor    import run_auditor    as _auditor
+        from summariser import run_summariser as _summariser
+        from crm_writer import run_writer     as _writer
+        return _scraper, _auditor, _summariser, _writer
+    except ImportError as e:
+        log.error(f"Agent import failed: {e}")
+        raise RuntimeError(f"Failed to import agent scripts: {e}") from e
 
 
 def run_pipeline(
@@ -51,6 +61,7 @@ def run_pipeline(
             on_progress(msg)
 
     started = time.time()
+    run_scraper, run_auditor, run_summariser, run_writer = _import_agents()
 
     # ── Agent 1: Scraper ─────────────────────────────────────────────────────
     emit(f"[1/4] Scraper — querying '{industry} in {location}' (max_pages={max_pages})...")

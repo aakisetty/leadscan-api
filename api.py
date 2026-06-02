@@ -150,6 +150,36 @@ def health():
     return {"status": "ok", "service": "LeadScan AI", "jobs_in_memory": len(JOBS)}
 
 
+@app.get("/debug")
+def debug():
+    """
+    Returns startup diagnostics. Open in browser to verify agents loaded.
+    No auth required so you can check it even if credentials aren't set yet.
+    """
+    import sys, importlib
+    _agents_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agents")
+    results = {}
+    for mod in ("scraper", "auditor", "summariser", "crm_writer"):
+        try:
+            spec = importlib.util.find_spec(mod)
+            results[mod] = "found" if spec else "not found"
+        except Exception as e:
+            results[mod] = f"error: {e}"
+    return {
+        "python": sys.version,
+        "agents_dir": _agents_dir,
+        "agents_dir_exists": os.path.isdir(_agents_dir),
+        "agent_modules": results,
+        "env_keys_set": {
+            "GOOGLE_PLACES_API_KEY": bool(os.environ.get("GOOGLE_PLACES_API_KEY")),
+            "PAGESPEED_API_KEY":     bool(os.environ.get("PAGESPEED_API_KEY")),
+            "ANTHROPIC_API_KEY":     bool(os.environ.get("ANTHROPIC_API_KEY")),
+            "GHL_API_KEY":           bool(os.environ.get("GHL_API_KEY")),
+            "API_SECRET_KEY":        bool(os.environ.get("API_SECRET_KEY")),
+        },
+    }
+
+
 @app.post("/run", status_code=202)
 def start_run(req: RunRequest, background_tasks: BackgroundTasks, _=Depends(require_api_key)):
     """
@@ -376,20 +406,32 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     };
     try {
       const r = await fetch('/run', { method:'POST', headers: authHeaders(), body: JSON.stringify(body) });
-      if (r.status === 401) { alert('Invalid API key — check the key above.'); btn.disabled=false; btn.textContent='▶ Run'; return; }
+      if (r.status === 401) { alert('Invalid API key — check the key entered above.'); btn.disabled=false; btn.textContent='▶ Run'; return; }
+      if (!r.ok) {
+        const txt = await r.text();
+        alert(`Server error ${r.status}: ${txt.slice(0,200)}\n\nCheck the Render Logs tab for details.`);
+        btn.disabled=false; btn.textContent='▶ Run'; return;
+      }
       const data = await r.json();
       showToast('Job started — ' + data.job_id.slice(0,8));
       pollJob(data.job_id);
       await refreshJobs();
-    } catch(e) { alert('Error: ' + e); }
+    } catch(e) { alert('Network error: ' + e + '\n\nIs the Render service running?'); }
     btn.disabled = false; btn.textContent = '▶ Run';
   }
 
   async function refreshJobs() {
-    const r = await fetch('/jobs', { headers: authHeaders() });
+    let r;
+    try { r = await fetch('/jobs', { headers: authHeaders() }); }
+    catch(e) { return; }  // Network error — silently skip refresh
     if (r.status === 401) {
       document.getElementById('jobs-container').innerHTML =
         '<div class="empty-state" style="color:#f87171">🔒 Enter your API key above to view jobs.</div>';
+      return;
+    }
+    if (!r.ok) {
+      document.getElementById('jobs-container').innerHTML =
+        `<div class="empty-state" style="color:#f87171">Server error ${r.status} — check Render Logs tab.</div>`;
       return;
     }
     const jobs = await r.json();
