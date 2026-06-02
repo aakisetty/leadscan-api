@@ -18,7 +18,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Security, Depends
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Security, Depends, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
@@ -32,19 +32,20 @@ _bearer = HTTPBearer(auto_error=False)
 
 def require_api_key(
     creds: HTTPAuthorizationCredentials = Security(_bearer),
+    key: str = None,   # ?key= query parameter (for direct browser access)
 ):
     """
-    Validates Bearer token against API_SECRET_KEY env var.
-    If API_SECRET_KEY is not set the server starts unprotected and logs a warning.
-    Accepts both:
-      Authorization: Bearer <key>
-      X-API-Key: <key>   (checked via query param fallback in the header)
+    Validates the API key against API_SECRET_KEY env var.
+    Accepts:
+      Authorization: Bearer <key>   (API clients, dashboard)
+      ?key=<key>                    (direct browser URLs)
+    If API_SECRET_KEY is not set, all access is open.
     """
     secret = os.environ.get("API_SECRET_KEY", "").strip()
     if not secret:
-        return  # No key configured — open access (warn at startup)
+        return  # No key configured — open access
 
-    token = (creds.credentials if creds else None)
+    token = (creds.credentials if creds else None) or key
     if token != secret:
         raise HTTPException(
             status_code=401,
@@ -226,7 +227,7 @@ def get_job(job_id: str):
 
 
 @app.get("/results/{job_id}")
-def get_results(job_id: str, _=Depends(require_api_key)):
+def get_results(job_id: str, key: str = Query(default=None), _=Depends(require_api_key)):
     """Returns the completed leads array as JSON."""
     job = JOBS.get(job_id)
     if not job:
